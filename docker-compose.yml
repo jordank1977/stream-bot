@@ -1,0 +1,11 @@
+services:
+  twitch-notifier:
+    build: .
+    container_name: twitch-notifier
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    environment:
+      - CACHE_FILE=/data/active_streams.json
