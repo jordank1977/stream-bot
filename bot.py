@@ -31,12 +31,21 @@ class TwitchBot:
         self.active_streams = self._load_cache()
 
     def _load_cache(self):
+        """Loads the active streams cache from disk with error handling."""
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if not isinstance(data, dict):
+                        logger.warning(f"Cache file {self.cache_file} is not a dictionary. Resetting.")
+                        return {}
+                    return data
+            except json.JSONDecodeError:
+                logger.error(f"Cache file {self.cache_file} is corrupted. Resetting.")
+                # Optional: rename corrupted file for debugging
+                return {}
             except Exception as e:
-                logger.error(f"Error loading cache: {e}")
+                logger.error(f"Unexpected error loading cache: {e}")
                 return {}
         return {}
 
@@ -141,11 +150,21 @@ class TwitchBot:
             logger.error(f"Error sending Discord notification: {e}")
 
     def poll_streams(self):
+        """
+        Polls Twitch API for live streams in the target category.
+        
+        Logic for Deduplication and Category Switching:
+        - We query the /streams endpoint filtered by game_id.
+        - If a streamer is in the response but NOT in our cache, they either just went live 
+          OR just switched their category to our target. We notify in both cases.
+        - The 'stream_id' remains constant during a session. Once notified, the ID stays 
+          in the cache until they stop streaming or switch categories.
+        """
         if not self.game_id:
             if not self.get_game_id():
                 return
 
-        logger.info(f"Polling for live streams in category: {self.game_name}...")
+        logger.debug(f"Polling for live streams in category: {self.game_name}...")
         url = f"https://api.twitch.tv/helix/streams?game_id={self.game_id}"
         headers = {
             "Client-ID": self.client_id,
@@ -159,26 +178,31 @@ class TwitchBot:
                 current_live_streams = data["data"]
                 current_live_ids = [s["id"] for s in current_live_streams]
                 
-                # Check for new streams
+                # Check for new streams (Started or Switched into category)
                 for stream in current_live_streams:
                     stream_id = stream["id"]
+                    user_name = stream["user_name"]
+                    
                     if stream_id not in self.active_streams:
-                        logger.info(f"New stream detected: {stream['user_name']}")
+                        logger.info(f"NOTIFICATION TRIGGERED: {user_name} is live in {self.game_name}")
                         self.send_discord_notification(stream)
                         self.active_streams[stream_id] = {
-                            "user_name": stream["user_name"],
-                            "started_at": stream["started_at"]
+                            "user_name": user_name,
+                            "user_login": stream["user_login"],
+                            "started_at": stream["started_at"],
+                            "detected_at": datetime.utcnow().isoformat()
                         }
                 
-                # Remove streams that are no longer live
+                # Cleanup: Remove streams that ended or switched OUT of the category
                 ids_to_remove = []
-                for cached_id in self.active_streams:
+                for cached_id in list(self.active_streams.keys()):
                     if cached_id not in current_live_ids:
                         ids_to_remove.append(cached_id)
                 
                 if ids_to_remove:
                     for rid in ids_to_remove:
-                        logger.info(f"Stream ended: {self.active_streams[rid]['user_name']}")
+                        cached_user = self.active_streams[rid]['user_name']
+                        logger.info(f"Stream ended or category changed for: {cached_user}")
                         del self.active_streams[rid]
                 
                 self._save_cache()
